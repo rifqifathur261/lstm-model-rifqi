@@ -1,151 +1,74 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import math
-from pathlib import Path
+import joblib
+from datetime import datetime, timedelta
+import plotly.express as px
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Memuat model yang telah dilatih
+pipeline = joblib.load('stock_price_pipeline_updated.pkl')
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Fungsi untuk menghitung fitur tambahan
+def calculate_features(data):
+    data['MA_3'] = data['Close'].rolling(window=3).mean().shift(1)
+    data['MA_5'] = data['Close'].rolling(window=5).mean().shift(1)
+    data['MA_10'] = data['Close'].rolling(window=10).mean().shift(1)
+    data['Return'] = data['Close'].pct_change().shift(1)
+    data['Volatility'] = data['Return'].rolling(window=10).std().shift(1)
+    data = data.fillna(0)
+    return data
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Judul aplikasi
+st.title('Stock Price Prediction')
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Input ticker saham
+st.header('Input Ticker Saham')
+ticker = st.text_input('Ticker', value='AAPL')
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Tombol untuk mengambil data dan melakukan prediksi
+if st.button('Predict'):
+    # Mendapatkan data saham 3 bulan terakhir
+    end_date = datetime.today().date()
+    start_date = end_date - timedelta(days=360)
+    stock_data = yf.download(ticker, start=start_date, end=end_date)
+    
+    if not stock_data.empty:
+        # Menghitung fitur tambahan untuk seluruh data
+        stock_data = calculate_features(stock_data)
+        
+        # Mengambil data terbaru setelah menghitung fitur tambahan
+        latest_data = stock_data.iloc[-1]
+        Open = latest_data['Open']
+        High = latest_data['High']
+        Low = latest_data['Low']
+        Close = latest_data['Close']
+        Volume = latest_data['Volume']
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+        # Membuat DataFrame untuk prediksi
+        input_data = pd.DataFrame({
+            'Open': [Open],
+            'High': [High],
+            'Low': [Low],
+            'Close': [Close],
+            'Volume': [Volume],
+            'MA_3': [latest_data['MA_3']],
+            'MA_5': [latest_data['MA_5']],
+            'MA_10': [latest_data['MA_10']],
+            'Return': [latest_data['Return']],
+            'Volatility': [latest_data['Volatility']]
+        })
+        
+        # Melakukan prediksi menggunakan pipeline
+        prediction = pipeline.predict(input_data)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+        # Menampilkan grafik garis harga penutupan 3 bulan terakhir
+        fig = px.line(stock_data, x=stock_data.index, y='Close', title=f'1 Year Close Prices for {ticker}')
+        st.plotly_chart(fig)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+        # Menampilkan harga penutupan terbaru dalam format Rupiah
+        st.subheader(f'Latest Close Price for {ticker}: Rp{Close:.2f}')
 
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+        # Menampilkan hasil prediksi dalam format Rupiah
+        st.subheader(f'Predicted Close Price for {ticker}: Rp{prediction[0]:.2f}')
+    else:
+        st.error(f'No data found for ticker: {ticker}')

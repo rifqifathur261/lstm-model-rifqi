@@ -1,2 +1,6 @@
 streamlit
 pandas
+yfinance
+joblib
+Plotly
+Scikit-Learn

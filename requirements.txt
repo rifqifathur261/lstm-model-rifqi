@@ -4,3 +4,6 @@ yfinance
 joblib
 Plotly
 Scikit-Learn
+TensorFlow
+NumPy
+tf_keras

@@ -1,74 +1,93 @@
 import streamlit as st
 import yfinance as yf
+import numpy as np
 import pandas as pd
-import joblib
-from datetime import datetime, timedelta
-import plotly.express as px
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import r2_score
+from keras.models import load_model
+from datetime import datetime
 
-# Memuat model yang telah dilatih
-pipeline = joblib.load('stock_price_pipeline_updated.pkl')
+# mengambil dataset dari yahoo finance
+def get_stock_data(ticker, start_date, end_date):
+    data = yf.download(ticker, start=start_date, end=end_date)
+    return data['Close'].values.reshape(-1, 1), data
 
-# Fungsi untuk menghitung fitur tambahan
-def calculate_features(data):
-    data['MA_3'] = data['Close'].rolling(window=3).mean().shift(1)
-    data['MA_5'] = data['Close'].rolling(window=5).mean().shift(1)
-    data['MA_10'] = data['Close'].rolling(window=10).mean().shift(1)
-    data['Return'] = data['Close'].pct_change().shift(1)
-    data['Volatility'] = data['Return'].rolling(window=10).std().shift(1)
-    data = data.fillna(0)
-    return data
+# Function to create sequences
+def create_sequences(data, time_steps=60):
+    X, y = [], []
+    for i in range(time_steps, len(data)):
+        X.append(data[i-time_steps:i, 0])
+        y.append(data[i, 0])
+    return np.array(X), np.array(y)
 
-# Judul aplikasi
-st.title('Stock Price Prediction')
+# membuat judul aplikasi
+st.title('Prediksi Harga Saham')
 
-# Input ticker saham
-st.header('Input Ticker Saham')
-ticker = st.text_input('Ticker', value='AAPL')
+# masukan dari user berupa kode emiten dan tanggal
+ticker = st.text_input('Masukan kode emiten', 'ANTM.JK')
+start_date = st.date_input('Tanggal Awal', datetime.today().replace(year=datetime.today().year - 5))
+end_date = st.date_input('Tanggal Akhir', datetime.today())
 
-# Tombol untuk mengambil data dan melakukan prediksi
-if st.button('Predict'):
-    # Mendapatkan data saham 3 bulan terakhir
-    end_date = datetime.today().date()
-    start_date = end_date - timedelta(days=360)
-    stock_data = yf.download(ticker, start=start_date, end=end_date)
+if st.button('Prediksi'):
+    # mendapatkan data baru
+    new_data, data = get_stock_data(ticker, start_date, end_date)
     
-    if not stock_data.empty:
-        # Menghitung fitur tambahan untuk seluruh data
-        stock_data = calculate_features(stock_data)
-        
-        # Mengambil data terbaru setelah menghitung fitur tambahan
-        latest_data = stock_data.iloc[-1]
-        Open = latest_data['Open']
-        High = latest_data['High']
-        Low = latest_data['Low']
-        Close = latest_data['Close']
-        Volume = latest_data['Volume']
-
-        # Membuat DataFrame untuk prediksi
-        input_data = pd.DataFrame({
-            'Open': [Open],
-            'High': [High],
-            'Low': [Low],
-            'Close': [Close],
-            'Volume': [Volume],
-            'MA_3': [latest_data['MA_3']],
-            'MA_5': [latest_data['MA_5']],
-            'MA_10': [latest_data['MA_10']],
-            'Return': [latest_data['Return']],
-            'Volatility': [latest_data['Volatility']]
-        })
-        
-        # Melakukan prediksi menggunakan pipeline
-        prediction = pipeline.predict(input_data)
-
-        # Menampilkan grafik garis harga penutupan 3 bulan terakhir
-        fig = px.line(stock_data, x=stock_data.index, y='Close', title=f'1 Year Close Prices for {ticker}')
-        st.plotly_chart(fig)
-
-        # Menampilkan harga penutupan terbaru dalam format Rupiah
-        st.subheader(f'Latest Close Price for {ticker}: Rp{Close:.2f}')
-
-        # Menampilkan hasil prediksi dalam format Rupiah
-        st.subheader(f'Predicted Close Price for {ticker}: Rp{prediction[0]:.2f}')
-    else:
-        st.error(f'No data found for ticker: {ticker}')
+    # penskalaan data menjadi 0-1
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_new_data = scaler.fit_transform(new_data)
+    
+    # membagi data menjadi 80% data training dan 20% data testing
+    train_size = int(len(scaled_new_data) * 0.8)
+    test_size = len(scaled_new_data) - train_size
+    train_data = scaled_new_data[:train_size]
+    test_data = scaled_new_data[train_size - 60:]  # 60-day lookback
+    
+    # Create sequences for training and testing
+    X_train, y_train = create_sequences(train_data)
+    X_test, y_test = create_sequences(test_data)
+    
+    # Reshape for LSTM input (samples, time_steps, features)
+    X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+    X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+    
+    # Load the model
+    model = load_model('lstm_model.h5')
+    
+    # Make predictions
+    predictions = model.predict(X_test)
+    predictions = scaler.inverse_transform(predictions)
+    y_test_actual = scaler.inverse_transform(y_test.reshape(-1, 1))
+    
+    # # Calculate RMSE
+    # rmse = np.sqrt(np.mean((predictions - y_test_actual)**2))
+    # st.write(f"Root Mean Squared Error (RMSE): {rmse}")
+    
+    # Calculate MAPE
+    mape = np.mean(np.abs((y_test_actual - predictions) / y_test_actual)) * 100
+    st.write(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+    
+    # Calculate R-squared
+    r2 = r2_score(y_test_actual, predictions)
+    st.write(f"R-squared: {r2:.2f}")
+    
+    # Get the corresponding dates for the test data
+    test_dates = data.index[-test_size:]
+    
+    # Plot results
+    plt.figure(figsize=(14, 6))
+    plt.plot(data.index, data['Close'], color='blue', label='Actual Price')
+    plt.plot(test_dates, predictions[-test_size:], color='red', label='Predicted Price')
+    plt.title(f'{ticker} Stock Price Prediction')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid(True)
+    st.pyplot(plt)
+    
+    # Use the last 60 days to predict the next day
+    last_sequence = scaled_new_data[-60:]
+    last_sequence = np.reshape(last_sequence, (1, 60, 1))
+    future_price_scaled = model.predict(last_sequence)
+    future_price = scaler.inverse_transform(future_price_scaled)
+    st.write(f"Prediksi harga di hari selanjutnya: {future_price[0][0]:.2f}")
